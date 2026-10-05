@@ -110,7 +110,7 @@
     </section>
   </main>
 </div>
-<input id="fileInput" type="file" accept=".vcf,text/vcard,text/x-vcard" class="hidden">
+<input id="fileInput" type="file" accept=".vcf,.vcard,text/vcard,text/x-vcard,text/plain,application/octet-stream" class="hidden">
 <div id="toast" class="toast"></div>
 
 <script>
@@ -138,11 +138,18 @@
   function decodeText(v){ return (v||'').replace(/\\n/gi,'\n').replace(/\\,/g,',').replace(/\\;/g,';').replace(/\\\\/g,'\\'); }
   function encodeText(v){ return String(v??'').replace(/\\/g,'\\\\').replace(/\n/g,'\\n').replace(/,/g,'\\,').replace(/;/g,'\\;'); }
   function splitLogicalLines(text){
+    text = String(text ?? '').replace(/^\uFEFF/, '');
     const raw = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n');
     const out=[];
-    for(const line of raw){
-      if((line.startsWith(' ')||line.startsWith('\t')) && out.length) out[out.length-1]+=line.slice(1);
-      else out.push(line);
+    for(let i=0;i<raw.length;i++){
+      const line=raw[i];
+      if((line.startsWith(' ')||line.startsWith('\t')) && out.length){
+        out[out.length-1]+=line.slice(1);
+      }else if(out.length && /=\s*$/.test(out[out.length-1]) && /ENCODING=QUOTED-PRINTABLE/i.test(out[out.length-1])){
+        out[out.length-1]=out[out.length-1].replace(/=\s*$/,'')+line;
+      }else{
+        out.push(line);
+      }
     }
     return out;
   }
@@ -158,14 +165,22 @@
   }
   function parseVCF(text){
     const lines=splitLogicalLines(text), contacts=[]; let current=null;
-    for(const line of lines){
-      if(/^BEGIN:VCARD$/i.test(line.trim())) current=['BEGIN:VCARD'];
-      else if(current){
+    for(const rawLine of lines){
+      const line=rawLine.replace(/^\uFEFF/,'');
+      const marker=line.trim().replace(/^["']|["']$/g,'');
+      if(/^BEGIN\s*:\s*VCARD$/i.test(marker)){
+        current=['BEGIN:VCARD'];
+      }else if(current){
         current.push(line);
-        if(/^END:VCARD$/i.test(line.trim())){ contacts.push(makeContact(current,contacts.length)); current=null; }
+        if(/^END\s*:\s*VCARD$/i.test(marker)){
+          contacts.push(makeContact(current,contacts.length));
+          current=null;
+        }
       }
     }
-    if(!contacts.length) throw new Error('No vCard contacts were found in this file.');
+    if(!contacts.length){
+      throw new Error('This file could not be read as a vCard contact file. It may use an unsupported encoding or export format.');
+    }
     return contacts;
   }
   function propEntries(c,name){
@@ -224,10 +239,19 @@
     els.fileName.textContent=state.filename; els.welcome.style.display='none'; els.workspace.classList.add('active'); els.search.value='';
     updateCount(); renderList(true); clearEditor(); updateStatus(); toast(contacts.length.toLocaleString()+' contacts loaded');
   }
+  async function readContactFile(file){
+    const buf=await file.arrayBuffer();
+    const bytes=new Uint8Array(buf);
+    let encoding='utf-8';
+    if(bytes.length>=2 && bytes[0]===0xFF && bytes[1]===0xFE) encoding='utf-16le';
+    else if(bytes.length>=2 && bytes[0]===0xFE && bytes[1]===0xFF) encoding='utf-16be';
+    try{return new TextDecoder(encoding,{fatal:false}).decode(buf).replace(/^\uFEFF/,'');}
+    catch{return await file.text();}
+  }
   async function loadFile(file){
     if(!file) return;
     if(state.dirty && !confirm('You have unsaved changes. Open another file and discard them?')) return;
-    try{ openText(await file.text(),file.name); }catch(err){ alert(err.message||'Could not read this contact file.'); }
+    try{ openText(await readContactFile(file),file.name); }catch(err){ alert(err.message||'Could not read this contact file.'); }
     els.fileInput.value='';
   }
   function updateCount(){ els.fileCount.textContent=state.filtered.length.toLocaleString()+(state.filtered.length===1?' contact':' contacts'); }
